@@ -7,7 +7,7 @@ It uses **discord.py** for the Discord gateway and slash commands, and **httpx**
 ## Features
 
 - Watches official notices, events, and info posts per game
-- Filters for giveaway/raffle language without treating every “event” post as a hit
+- Filters for community merch raffles without treating in-game events, store launches, or patch notes as hits
 - Stores seen post IDs in SQLite so alerts are never duplicated
 - Seeds existing posts on first run (no historical dump)
 - Rich embeds with game name, logo, snippet, author, period, and HoYoLAB link
@@ -104,12 +104,14 @@ Posts are fetched from HoYoLAB’s public endpoints:
 
 Game IDs: Honkai Impact 3rd `1`, Genshin Impact `2`, Honkai: Star Rail `6`, Zenless Zone Zero `8`, Honkai: Nexus Anima `9`.
 
-A post alerts only when it is official **and** matches a two-tier keyword filter:
+A post alerts only when it is official **and** looks like a community merch raffle:
 
-- Strong hits: raffle, giveaway, lucky draw, merch, comment to enter, prize, winner, sweepstakes, …
-- Reward words (primogems, stellar jade, polychrome, aspect gems, crystals) **only** if an action word is also present (win, draw, redeem, lottery, codes, …)
+- Raffle-intent phrases: raffle, giveaway, lucky draw, sweepstakes, prize event, leave a comment, comment to enter, leave a reply
+- Or **how to participate** together with a physical reward term (plush, keychain, acrylic, figure, merch, vinyl, …)
+- Matching uses word boundaries, so `win` inside `window` / `following` / `Wind` does not count
+- Store launches, Event Warps, version update details, and maintenance/compensation posts are excluded
 
-The bare word `event` is **not** enough on its own, so routine patch notes are not treated as raffles.
+Bare `merch`, `prize`, `winner`, or in-game currency (primogems, stellar jade, …) is **not** enough on its own. The bare word `event` is also not enough, so routine patch notes are not treated as raffles.
 
 ## Project layout
 

@@ -8,40 +8,38 @@ from typing import Iterable
 
 from utils.api import HoyolabPost
 
-STRONG_KEYWORDS: tuple[str, ...] = (
+# Community giveaway language. Bare "merch" / "prize" / "winner" are not enough.
+RAFFLE_INTENT_PHRASES: tuple[str, ...] = (
     "raffle",
     "giveaway",
+    "giveaways",
     "lucky draw",
-    "merch",
-    "comment to enter",
-    "leave a comment",
-    "prize",
-    "winner",
-    "winners",
     "sweepstakes",
+    "prize event",
+    "leave a comment",
+    "comment to enter",
+    "leave a reply",
 )
 
-REWARD_KEYWORDS: tuple[str, ...] = (
-    "primogems",
-    "primogem",
-    "stellar jade",
-    "polychrome",
-    "crystals",
-    "crystal",
-    "aspect gems",
-    "aspect gem",
+# In-game events and store/patch posts that should never alert.
+NEGATIVE_PHRASES: tuple[str, ...] = (
+    "event warp",
+    "update details",
+    "amazon store",
+    "server maintenance",
+    "bug compensation",
 )
 
-ACTION_KEYWORDS: tuple[str, ...] = (
-    "redeem",
-    "win",
-    "draw",
-    "lottery",
-    "codes",
-    "code",
-    "enter",
-    "participate",
-    "chance to",
+ENTRY_AND_REWARD_PHRASE = "how to participate"
+
+PHYSICAL_REWARD_TERMS: tuple[str, ...] = (
+    "plush",
+    "keychain",
+    "acrylic",
+    "figure",
+    "merch",
+    "merchandise",
+    "vinyl",
 )
 
 _MONTH = (
@@ -81,20 +79,37 @@ _DATE_FORMATS: tuple[str, ...] = (
 )
 
 
-def _contains_any(text: str, keywords: Iterable[str]) -> bool:
-    return any(keyword in text for keyword in keywords)
+def _compile_phrases(phrases: Iterable[str]) -> tuple[re.Pattern[str], ...]:
+    compiled: list[re.Pattern[str]] = []
+    for phrase in phrases:
+        cleaned = phrase.strip()
+        if not cleaned:
+            continue
+        escaped = re.escape(cleaned).replace(r"\ ", r"\s+")
+        compiled.append(re.compile(rf"(?<!\w){escaped}(?!\w)", re.IGNORECASE))
+    return tuple(compiled)
+
+
+_INTENT_PATTERNS = _compile_phrases(RAFFLE_INTENT_PHRASES)
+_NEGATIVE_PATTERNS = _compile_phrases(NEGATIVE_PHRASES)
+_ENTRY_PATTERN = _compile_phrases((ENTRY_AND_REWARD_PHRASE,))[0]
+_PHYSICAL_PATTERNS = _compile_phrases(PHYSICAL_REWARD_TERMS)
+
+
+def _matches_any(text: str, patterns: Iterable[re.Pattern[str]]) -> bool:
+    return any(pattern.search(text) for pattern in patterns)
 
 
 def is_raffle_post(post: HoyolabPost, extra_keywords: Iterable[str] = ()) -> bool:
-    """Return True when title/snippet look like a giveaway or raffle."""
-    haystack = f"{post.title}\n{post.snippet}".lower()
-    extras = tuple(keyword.lower() for keyword in extra_keywords if keyword)
+    """Return True when title/snippet look like a community merch raffle."""
+    haystack = f"{post.title}\n{post.snippet}"
+    if _matches_any(haystack, _NEGATIVE_PATTERNS):
+        return False
 
-    if _contains_any(haystack, STRONG_KEYWORDS) or _contains_any(haystack, extras):
+    extras = _compile_phrases(extra_keywords)
+    if _matches_any(haystack, _INTENT_PATTERNS) or _matches_any(haystack, extras):
         return True
-    return _contains_any(haystack, REWARD_KEYWORDS) and _contains_any(
-        haystack, ACTION_KEYWORDS
-    )
+    return bool(_ENTRY_PATTERN.search(haystack) and _matches_any(haystack, _PHYSICAL_PATTERNS))
 
 
 def _parse_datetime(raw: str) -> datetime | None:

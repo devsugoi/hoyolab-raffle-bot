@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
 import logging
 import re
 from dataclasses import dataclass, replace
@@ -43,6 +44,9 @@ class HoyolabPost:
     period_label: str | None = None
 
 
+_LANG_STUB = re.compile(r"^[a-z]{2}(?:-[a-z]{2})?$", re.IGNORECASE)
+
+
 def _html_to_text(raw: str) -> str:
     if not raw:
         return ""
@@ -50,6 +54,46 @@ def _html_to_text(raw: str) -> str:
     text = re.sub(r"</p>", "\n", text, flags=re.IGNORECASE)
     text = re.sub(r"<[^>]+>", "", text)
     return html.unescape(text).strip()
+
+
+def _is_language_stub(text: str) -> bool:
+    cleaned = text.strip()
+    return not cleaned or bool(_LANG_STUB.fullmatch(cleaned))
+
+
+def _structured_content_to_text(raw: Any) -> str:
+    if not raw:
+        return ""
+    blocks: Any = raw
+    if isinstance(raw, str):
+        try:
+            blocks = json.loads(raw)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return _html_to_text(raw)
+    if not isinstance(blocks, list):
+        return ""
+    parts: list[str] = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        insert = block.get("insert")
+        if isinstance(insert, str):
+            parts.append(insert)
+    return _html_to_text("".join(parts))
+
+
+def _post_body_text(post: dict[str, Any], fallback: str = "") -> str:
+    """Prefer HTML content; use structured_content/desc when content is a lang stub."""
+    content = _html_to_text(str(post.get("content") or ""))
+    if content and not _is_language_stub(content):
+        return content
+    structured = _structured_content_to_text(post.get("structured_content"))
+    if structured:
+        return structured
+    desc = _html_to_text(str(post.get("desc") or ""))
+    if desc:
+        return desc
+    return fallback
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -111,7 +155,7 @@ def _parse_row(row: Any, gids: int, news_type: int) -> HoyolabPost | None:
         title = _html_to_text(str(post.get("subject") or "")).strip()
         if not post_id or not title:
             return None
-        snippet = _html_to_text(str(post.get("content") or post.get("desc") or ""))
+        snippet = _post_body_text(post)
         game_id = post.get("game_id", gids)
         try:
             parsed_gids = int(game_id)
@@ -232,7 +276,7 @@ class HoyolabClient:
             wrapper = _as_dict(data.get("post"))
             inner = _as_dict(wrapper.get("post"))
             user = _as_dict(wrapper.get("user"))
-            content = _html_to_text(str(inner.get("content") or post.snippet))
+            content = _post_body_text(inner, fallback=post.snippet)
             title = _html_to_text(str(inner.get("subject") or post.title)) or post.title
             cover = _cover_from_row(wrapper, inner) or post.cover_url
             author = str(user.get("nickname") or post.author).strip() or post.author
