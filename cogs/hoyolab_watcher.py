@@ -17,6 +17,8 @@ from discord.ext import commands
 import config
 from utils.api import HoyolabClient, HoyolabPost
 from utils.db import Database
+from utils.raffle_ai import RaffleAnalyzer
+from utils.reminders import ReminderWorker, build_reminder_embed
 from utils.filters import extract_event_period, is_expired, is_raffle_post
 
 log = logging.getLogger(__name__)
@@ -112,6 +114,9 @@ class HoyolabWatcher(commands.Cog):
         self.bot = bot
         self.db = Database(config.SQLITE_PATH)
         self.client = HoyolabClient(language=config.HOYOLAB_LANG)
+        self.analyzer = RaffleAnalyzer()
+        self.reminders = ReminderWorker(self.db, self.analyzer, self._send_reminder)
+        self._reminder_tasks = []
         self._scan_lock = asyncio.Lock()
         self._task: asyncio.Task[None] | None = None
         self.started_at = datetime.now(timezone.utc)
@@ -122,8 +127,16 @@ class HoyolabWatcher(commands.Cog):
     async def cog_load(self) -> None:
         await self.db.init()
         self._task = asyncio.create_task(self._watch_loop(), name="hoyolab-watch")
+        self._reminder_tasks = [
+            asyncio.create_task(self._reminder_loop(phase), name=f"raffle-{phase}")
+            for phase in ("analysis", "delivery")
+        ]
 
     async def cog_unload(self) -> None:
+        for task in self._reminder_tasks:
+            task.cancel()
+        await asyncio.gather(*self._reminder_tasks, return_exceptions=True)
+        await self.analyzer.aclose()
         if self._task is not None:
             self._task.cancel()
             try:
@@ -262,6 +275,7 @@ class HoyolabWatcher(commands.Cog):
                     detailed = post
                     if post.official or is_raffle_post(post, config.RAFFLE_KEYWORDS):
                         detailed = await self.client.get_post_full(post)
+                    original = detailed
                     detailed = self._enrich_period(detailed)
 
                     if is_expired(detailed):
@@ -284,6 +298,7 @@ class HoyolabWatcher(commands.Cog):
                         continue
                     sent = await self._notify(detailed)
                     if sent:
+                        await self.db.enqueue_raffle(original)
                         await self.db.mark_seen(detailed, notified=True)
                         result.notified += 1
                     else:
@@ -309,6 +324,37 @@ class HoyolabWatcher(commands.Cog):
                 log.exception("Scan failed")
                 raise
 
+    async def _reminder_loop(self, phase):
+        await self.bot.wait_until_ready()
+        while not self.bot.is_closed():
+            try:
+                operation = self.reminders.analyze_one if phase == "analysis" else self.reminders.send_one
+                result = await operation()
+                if result is None or result == "deferred":
+                    await asyncio.sleep(config.REMINDER_POLL_SECONDS)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.error("Raffle %s worker failed (%s)", phase, type(exc).__name__)
+                await asyncio.sleep(config.REMINDER_POLL_SECONDS)
+
+    async def _send_reminder(self, row):
+        # Pin one destination before the send. A failed channel must not spill into
+        # a webhook and then be resent to the channel on retry.
+        destination = row["destination"]
+        if not destination:
+            channel_id = await self.get_alert_channel_id()
+            destination = f"channel:{channel_id}" if channel_id else ("webhook" if config.DISCORD_WEBHOOK_URL else None)
+            if not destination:
+                return False
+            await self.db.reminder_query(
+                "UPDATE raffle_reminders SET destination=? WHERE post_id=? AND claim_token=?",
+                (destination, row["post_id"], row["claim_token"]))
+        embed = build_reminder_embed(row)
+        if destination == "webhook":
+            return await self._send_webhook(embed)
+        return await self._send_channel(embed, channel_id=int(destination.split(":")[1]))
+
     async def _notify(self, post: HoyolabPost, *, sample: bool = False) -> bool:
         embed = build_embed(post, sample=sample)
         channel_ok = await self._send_channel(embed)
@@ -317,8 +363,9 @@ class HoyolabWatcher(commands.Cog):
             return channel_ok or webhook_ok
         return channel_ok
 
-    async def _send_channel(self, embed: discord.Embed) -> bool:
-        channel_id = await self.get_alert_channel_id()
+    async def _send_channel(self, embed: discord.Embed, *, channel_id: int | None = None) -> bool:
+        if channel_id is None:
+            channel_id = await self.get_alert_channel_id()
         if channel_id is None:
             log.warning("No alert channel configured; skipping Discord channel send")
             return False
@@ -351,14 +398,13 @@ class HoyolabWatcher(commands.Cog):
                 response = await client.post(config.DISCORD_WEBHOOK_URL, json=payload)
                 if response.status_code >= 400:
                     log.error(
-                        "Webhook returned %s: %s",
+                        "Webhook returned %s",
                         response.status_code,
-                        response.text[:300],
                     )
                     return False
             return True
         except httpx.HTTPError as exc:
-            log.error("Webhook send failed: %s", exc)
+            log.error("Webhook send failed (%s)", type(exc).__name__)
             return False
 
     @app_commands.command(

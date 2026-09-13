@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+import json
+from dataclasses import asdict
+from contextlib import contextmanager
+from typing import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -19,6 +23,29 @@ CREATE TABLE IF NOT EXISTS seen_posts (
     seen_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS raffle_reminders (
+    post_id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    url TEXT NOT NULL,
+    gids INTEGER NOT NULL,
+    post_json TEXT NOT NULL,
+    historical INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL,
+    end_at REAL,
+    winner_at REAL,
+    reminder_at REAL,
+    reason TEXT,
+    created_at REAL NOT NULL,
+    sent_at REAL,
+    destination TEXT,
+    next_attempt_at REAL NOT NULL DEFAULT 0,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    claim_token TEXT,
+    lease_until REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS raffle_reminders_due ON raffle_reminders(status, reminder_at);
+CREATE INDEX IF NOT EXISTS raffle_reminders_analysis ON raffle_reminders(status, next_attempt_at);
+
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT
@@ -30,10 +57,15 @@ class Database:
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(self.path)
         conn.row_factory = sqlite3.Row
-        return conn
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     async def init(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -162,3 +194,46 @@ class Database:
                 )
 
         await asyncio.to_thread(_write)
+
+    async def reminder_query(self, sql: str, params=()):
+        """Short SQLite transactions, also shared by standalone backfill."""
+        def run():
+            with self._connect() as conn:
+                return [dict(row) for row in conn.execute(sql, params).fetchall()]
+        return await asyncio.to_thread(run)
+
+    async def enqueue_raffle(self, post: HoyolabPost, *, historical=False):
+        payload = asdict(post)
+        for key in ('created_at', 'end_at'):
+            payload[key] = payload[key].isoformat() if payload[key] else None
+        rows = await self.reminder_query(
+            '''INSERT INTO raffle_reminders
+               (post_id, title, url, gids, post_json, historical, status, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, 'analysis_pending', ?) ON CONFLICT(post_id) DO NOTHING RETURNING post_id''',
+            (post.post_id, post.title, post.url, post.gids, json.dumps(payload), int(historical),
+             datetime.now(timezone.utc).timestamp()))
+        return bool(rows)
+
+    async def reminder_exists(self, post_id):
+        return bool(await self.reminder_query('SELECT 1 FROM raffle_reminders WHERE post_id=?', (post_id,)))
+
+    async def claim_reminder(self, phase, now, token):
+        status = 'analysis_pending' if phase == 'analysis' else 'pending'
+        due = 'next_attempt_at' if phase == 'analysis' else 'reminder_at'
+        rows = await self.reminder_query(
+            f'''UPDATE raffle_reminders SET claim_token=?, lease_until=?
+                WHERE post_id=(SELECT post_id FROM raffle_reminders
+                    WHERE status=? AND {due}<=? AND next_attempt_at<=?
+                    AND lease_until<=? ORDER BY {due}, post_id LIMIT 1)
+                RETURNING *''', (token, now + 300, status, now, now, now))
+        return rows[0] if rows else None
+
+    async def finish_reminder(self, post_id, token, **values):
+        allowed = {'status', 'end_at', 'winner_at', 'reminder_at', 'reason',
+                   'sent_at', 'next_attempt_at', 'destination', 'attempts'}
+        if not values or not set(values) <= allowed:
+            raise ValueError('Invalid reminder update')
+        assignments = ', '.join(f'{key}=?' for key in values)
+        await self.reminder_query(
+            f'''UPDATE raffle_reminders SET {assignments}, claim_token=NULL, lease_until=0
+                WHERE post_id=? AND claim_token=?''', (*values.values(), post_id, token))

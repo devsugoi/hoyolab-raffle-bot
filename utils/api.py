@@ -265,16 +265,20 @@ class HoyolabClient:
                 posts.append(parsed)
         return posts
 
-    async def get_post_full(self, post: HoyolabPost) -> HoyolabPost:
+    async def get_post_full(self, post: HoyolabPost, *, strict: bool = False) -> HoyolabPost:
         try:
             data = await self._get(POST_FULL_PATH, {"post_id": post.post_id})
         except HoyolabAPIError as exc:
+            if strict:
+                raise
             log.warning("getPostFull failed for %s: %s", post.post_id, exc)
             return post
 
         try:
             wrapper = _as_dict(data.get("post"))
             inner = _as_dict(wrapper.get("post"))
+            if strict and (not inner or str(inner.get("post_id")) != post.post_id):
+                raise HoyolabAPIError("Missing original post")
             user = _as_dict(wrapper.get("user"))
             content = _post_body_text(inner, fallback=post.snippet)
             title = _html_to_text(str(inner.get("subject") or post.title)) or post.title
@@ -294,5 +298,7 @@ class HoyolabClient:
                 end_at=end_at,
             )
         except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            if strict:
+                raise HoyolabAPIError("Malformed original post") from exc
             log.warning("Unexpected getPostFull schema for %s: %s", post.post_id, exc)
             return post

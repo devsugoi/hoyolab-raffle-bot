@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
@@ -94,3 +95,29 @@ USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/128.0.0.0 Safari/537.36"
 )
+
+# Raffle result reminders: date-only facts use this local evening time.
+REMINDER_TIMEZONE = os.getenv("REMINDER_TIMEZONE", "Asia/Singapore")
+ZoneInfo(REMINDER_TIMEZONE)  # Fail early for an invalid IANA timezone.
+REMINDER_DEFAULT_HOUR = _int_env("REMINDER_DEFAULT_HOUR", 18)
+if not 0 <= REMINDER_DEFAULT_HOUR <= 23:
+    raise ValueError("REMINDER_DEFAULT_HOUR must be 0..23")
+REMINDER_POLL_SECONDS = max(10, _int_env("REMINDER_POLL_SECONDS", 60))
+HISTORICAL_CATCHUP_DAYS = max(0, _int_env("HISTORICAL_CATCHUP_DAYS", 30))
+
+
+def _numbered_env(prefix: str) -> tuple[str, ...]:
+    """Primary plus _2 through _20, in order; skip blanks, gaps and duplicates."""
+    values = []
+    for name in (prefix, *(f"{prefix}_{index}" for index in range(2, 21))):
+        value = os.getenv(name, "").strip()
+        if value and value not in values:
+            values.append(value)
+    return tuple(values)
+
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+GEMINI_API_KEYS = _numbered_env("GEMINI_API_KEY")
+GEMINI_FALLBACK_MODELS = _numbered_env("GEMINI_FALLBACK_MODEL")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash").strip() or "gemini-3.5-flash"
+GEMINI_MIN_INTERVAL_SECONDS = max(1, _int_env("GEMINI_MIN_INTERVAL_SECONDS", 15))
