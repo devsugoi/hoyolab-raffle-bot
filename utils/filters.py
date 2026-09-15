@@ -18,6 +18,7 @@ RAFFLE_INTENT_PHRASES: tuple[str, ...] = (
     "prize event",
     "leave a comment",
     "comment to enter",
+    "comment for a chance to win",
     "leave a reply",
 )
 

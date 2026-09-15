@@ -106,7 +106,7 @@ Game IDs: Honkai Impact 3rd `1`, Genshin Impact `2`, Honkai: Star Rail `6`, Zenl
 
 A post alerts only when it is official **and** looks like a community merch raffle:
 
-- Raffle-intent phrases: raffle, giveaway, lucky draw, sweepstakes, prize event, leave a comment, comment to enter, leave a reply
+- Raffle-intent phrases: raffle, giveaway, lucky draw, sweepstakes, prize event, leave a comment, comment to enter, comment for a chance to win, leave a reply
 - Or **how to participate** together with a physical reward term (plush, keychain, acrylic, figure, merch, vinyl, …)
 - Matching uses word boundaries, so `win` inside `window` / `following` / `Wind` does not count
 - Store launches, Event Warps, version update details, and maintenance/compensation posts are excluded
